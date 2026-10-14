@@ -1,6 +1,6 @@
 {
   "name": "agentic-translate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Translate text with DeepL, OpenAI, and Cloudflare Workers AI through a CLI, MCP server, or agent library.",
   "keywords": [
     "deepl",
