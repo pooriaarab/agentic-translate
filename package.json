@@ -1,22 +1,21 @@
 {
-  "name": "@pooriaarab/agentic-scaffold",
+  "name": "agentic-translate",
   "version": "0.1.0",
-  "description": "Canonical scaffold for a CLI plus library plus MCP server pack.",
+  "description": "Translate one text into a named language.",
   "keywords": [
+    "translate",
+    "translation",
     "cli",
     "mcp",
-    "scaffold",
-    "starter",
-    "typescript"
+    "agentic"
   ],
   "license": "MIT",
   "author": "Pooria Arab",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pooriaarab/agentic-scaffold.git"
+    "url": "https://github.com/pooriaarab/agentic-translate.git"
   },
   "type": "module",
-  "private": true,
   "engines": {
     "node": ">=18"
   },
@@ -26,7 +25,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "mcpName": "io.github.pooriaarab/agentic-scaffold",
+  "mcpName": "io.github.pooriaarab/agentic-translate",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -36,8 +35,8 @@
     }
   },
   "bin": {
-    "agentic-pack": "./dist/cli.js",
-    "agentic-pack-mcp": "./dist/mcp-bin.js"
+    "agentic-translate": "./dist/cli.js",
+    "agentic-translate-mcp": "./dist/mcp-bin.js"
   },
   "scripts": {
     "build": "tsup",
