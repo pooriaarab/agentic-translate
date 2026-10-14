@@ -3,14 +3,18 @@
   "version": "0.1.1",
   "description": "Translate text with DeepL, OpenAI, and Cloudflare Workers AI through a CLI, MCP server, or agent library.",
   "keywords": [
-    "DeepL",
-    "OpenAI",
-    "Cloudflare Workers AI",
-    "translate",
+    "deepl",
+    "openai",
+    "cloudflare-workers-ai",
     "translation",
+    "text-translation",
+    "machine-translation",
+    "typescript",
+    "nodejs",
     "cli",
     "mcp",
-    "agent"
+    "language",
+    "dry-run"
   ],
   "license": "MIT",
   "author": "Pooria Arab",
