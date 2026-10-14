@@ -16,6 +16,22 @@ describe("translate", () => {
 });
 
 describe("vendor fixtures", () => {
+  test.each([
+    ["deepl", "DEEPL_API_KEY", "https://api-free.deepl.com/v2/translate", { translations: [{ text: "Bonjour" }] }],
+    ["openai", "OPENAI_API_KEY", "https://api.openai.com/v1/chat/completions", { choices: [{ message: { content: "Bonjour" } }] }],
+    ["workers-ai", "CLOUDFLARE_API_TOKEN", "https://api.cloudflare.com/client/v4/accounts/fixture-account/ai/run/@cf/meta/m2m100-1.2b", { result: { translated_text: "Bonjour" } }],
+  ] as const)("calls the real %s HTTPS host with a fake fetch", async (vendor, keyName, host, body) => {
+    process.env[keyName] = "fixture";
+    if (vendor === "workers-ai") process.env.CLOUDFLARE_ACCOUNT_ID = "fixture-account";
+    const fetchFn = async (input: string | URL | Request) => {
+      expect(String(input)).toBe(host);
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+    await expect(createVendorAdapter(vendor, { fetchFn }).translate("Hello", "FR")).resolves.toBe("Bonjour");
+    delete process.env[keyName];
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
+  });
+
   test("parses a DeepL response", async () => {
     process.env.DEEPL_API_KEY = "fixture";
     const adapter = createVendorAdapter("deepl", { fetchFn: async () => new Response(JSON.stringify({ translations: [{ text: "Bonjour" }] }), { status: 200 }) });
