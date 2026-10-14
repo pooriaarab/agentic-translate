@@ -1,83 +1,26 @@
 import { randomUUID } from "node:crypto";
 
-// Brand config. Each pack defines one brand and reuses it in the
-// library, the CLI, and the MCP server so the three faces agree.
+export type Vendor = "deepl" | "openai" | "workers-ai";
 
-export interface BrandConfig {
-  name: string;
-  command: string;
-  description: string;
-  keywords: string[];
-  version: string;
+export interface TranslateRequest {
+  text: string;
+  targetLanguage: string;
+  vendor?: Vendor;
+  dryRun?: boolean;
 }
 
-export function defineBrand(config: BrandConfig): BrandConfig {
-  for (const key of ["name", "command", "version"] as const) {
-    if (config[key].trim().length === 0) {
-      throw new Error(`brand ${key} must not be empty`);
-    }
-  }
-  return Object.freeze({ ...config, keywords: [...config.keywords] });
-}
-
-// Logger. Logs go to stderr so result output on stdout stays clean.
-
-export type LogLevel = "debug" | "info" | "warn" | "error";
-
-const LEVEL_ORDER: Record<LogLevel, number> = {
-  debug: 0,
-  info: 1,
-  warn: 2,
-  error: 3,
-};
-
-export interface Logger {
-  debug(message: string): void;
-  info(message: string): void;
-  warn(message: string): void;
-  error(message: string): void;
-}
-
-export interface LoggerOptions {
-  level?: LogLevel;
-  quiet?: boolean;
-  sink?: (line: string) => void;
-}
-
-export function createLogger(options: LoggerOptions = {}): Logger {
-  const level = options.level ?? "info";
-  const quiet = options.quiet ?? false;
-  const sink =
-    options.sink ?? ((line: string) => process.stderr.write(`${line}\n`));
-  const emit = (at: LogLevel, message: string): void => {
-    if (quiet) return;
-    if (LEVEL_ORDER[at] < LEVEL_ORDER[level]) return;
-    sink(`[${at}] ${message}`);
-  };
-  return {
-    debug: (message) => emit("debug", message),
-    info: (message) => emit("info", message),
-    warn: (message) => emit("warn", message),
-    error: (message) => emit("error", message),
-  };
-}
-
-// Errors. Adapters and guards throw these. Callers catch and report.
-// Nothing in this core swallows a failure and returns success.
-
-export class GuardError extends Error {
-  readonly code = "GUARD_DENIED";
-
-  constructor(message: string) {
-    super(message);
-    this.name = "GuardError";
-  }
+export interface TranslationResult {
+  dryRun: boolean;
+  vendor: Vendor;
+  text: string;
+  targetLanguage: string;
+  translation?: string;
+  id?: string;
 }
 
 export class VendorError extends Error {
   readonly code = "VENDOR_FAILED";
   readonly status?: number;
-
   constructor(message: string, options: { status?: number; cause?: unknown } = {}) {
     super(message, { cause: options.cause });
     this.name = "VendorError";
@@ -85,286 +28,82 @@ export class VendorError extends Error {
   }
 }
 
-// Guards. Caps bound total dispatches. Quiet hours block a UTC window.
-// The blocklist blocks texts that contain a banned term.
-
-export interface CapsConfig {
-  maxDispatches?: number;
+export interface VendorAdapter {
+  readonly vendor: Vendor;
+  translate(text: string, targetLanguage: string): Promise<string>;
 }
 
-export interface QuietHoursConfig {
-  startHour?: number;
-  endHour?: number;
+export interface FetchOptions { fetchFn?: typeof fetch }
+
+function requireKey(name: string): string {
+  const key = process.env[name];
+  if (!key) throw new VendorError(`${name} is required for a live translation`);
+  return key;
 }
 
-export interface GuardsConfig {
-  caps?: CapsConfig;
-  quietHours?: QuietHoursConfig;
-  blocklist?: string[];
-  now?: () => Date;
+async function request(fetchFn: typeof fetch, url: string, init: RequestInit, vendor: Vendor): Promise<unknown> {
+  let response: Response;
+  try { response = await fetchFn(url, init); }
+  catch (cause) { throw new VendorError(`${vendor} request failed: ${String(cause)}`, { cause }); }
+  const body = await response.text();
+  if (!response.ok) throw new VendorError(`${vendor} returned ${response.status}: ${body}`, { status: response.status });
+  try { return JSON.parse(body); }
+  catch { throw new VendorError(`${vendor} returned invalid JSON: ${body}`); }
 }
 
-export interface Guards {
-  readonly dispatchCount: number;
-  checkDispatch(text: string): void;
-  recordDispatch(): void;
-}
-
-function assertHour(value: number | undefined, label: string): void {
-  if (value === undefined) return;
-  if (!Number.isInteger(value) || value < 0 || value > 24) {
-    throw new Error(`${label} must be an integer from 0 to 24`);
-  }
-}
-
-export function createGuards(config: GuardsConfig = {}): Guards {
-  const maxDispatches = config.caps?.maxDispatches;
-  if (
-    maxDispatches !== undefined &&
-    (!Number.isInteger(maxDispatches) || maxDispatches < 0)
-  ) {
-    throw new Error("caps.maxDispatches must be an integer of 0 or more");
-  }
-  const startHour = config.quietHours?.startHour;
-  const endHour = config.quietHours?.endHour;
-  assertHour(startHour, "quietHours.startHour");
-  assertHour(endHour, "quietHours.endHour");
-  const blocklist = (config.blocklist ?? []).map((term) => term.toLowerCase());
-  const now = config.now ?? (() => new Date());
-  let count = 0;
-
-  const inQuietHours = (date: Date): boolean => {
-    if (startHour === undefined || endHour === undefined) return false;
-    const hour = date.getUTCHours();
-    if (startHour <= endHour) {
-      return hour >= startHour && hour < endHour;
-    }
-    return hour >= startHour || hour < endHour;
-  };
-
-  return {
-    get dispatchCount(): number {
-      return count;
-    },
-    checkDispatch(text: string): void {
-      if (maxDispatches !== undefined && count >= maxDispatches) {
-        throw new GuardError(
-          `dispatch cap reached (${maxDispatches} of ${maxDispatches})`,
-        );
-      }
-      if (inQuietHours(now())) {
-        throw new GuardError(
-          `quiet hours block dispatches from ${startHour}:00 to ${endHour}:00 UTC`,
-        );
-      }
-      const lowered = text.toLowerCase();
-      for (const term of blocklist) {
-        if (term.length > 0 && lowered.includes(term)) {
-          throw new GuardError(`text matches blocklisted term "${term}"`);
-        }
-      }
-    },
-    recordDispatch(): void {
-      count += 1;
-    },
-  };
-}
-
-// Router adapters. Each adapter delivers one text and returns a receipt.
-// Adapters throw VendorError on failure. They never swallow it.
-
-export interface DispatchReceipt {
-  adapter: string;
-  id: string;
-  chars: number;
-  at: string;
-}
-
-export interface RouterAdapter {
-  readonly name: string;
-  dispatch(text: string): Promise<DispatchReceipt>;
-}
-
-export class LocalRouterAdapter implements RouterAdapter {
-  readonly name = "local";
-
-  async dispatch(text: string): Promise<DispatchReceipt> {
-    if (typeof text !== "string") {
-      throw new VendorError("local adapter needs a string");
-    }
-    return {
-      adapter: this.name,
-      id: randomUUID(),
-      chars: text.length,
-      at: new Date().toISOString(),
-    };
-  }
-}
-
-export interface HttpRouterOptions {
-  timeoutMs?: number;
-  fetchFn?: typeof fetch;
-}
-
-export class HttpRouterAdapter implements RouterAdapter {
-  readonly name = "http";
-  private readonly endpoint: string;
-  private readonly timeoutMs: number;
+export class DeepLAdapter implements VendorAdapter {
+  readonly vendor = "deepl" as const;
   private readonly fetchFn: typeof fetch;
-
-  constructor(endpoint: string, options: HttpRouterOptions = {}) {
-    if (endpoint.trim().length === 0) {
-      throw new Error("http adapter needs an endpoint URL");
-    }
-    this.endpoint = endpoint;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
-    this.fetchFn = options.fetchFn ?? fetch;
-  }
-
-  async dispatch(text: string): Promise<DispatchReceipt> {
-    let response: Response;
-    try {
-      response = await this.fetchFn(this.endpoint, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (error) {
-      throw new VendorError(`http adapter request failed: ${String(error)}`, {
-        cause: error,
-      });
-    }
-    if (!response.ok) {
-      throw new VendorError(
-        `http adapter got status ${response.status} from ${this.endpoint}`,
-        { status: response.status },
-      );
-    }
-    return {
-      adapter: this.name,
-      id: randomUUID(),
-      chars: text.length,
-      at: new Date().toISOString(),
-    };
+  constructor(options: FetchOptions = {}) { this.fetchFn = options.fetchFn ?? fetch; }
+  async translate(text: string, targetLanguage: string): Promise<string> {
+    const key = requireKey("DEEPL_API_KEY");
+    const params = new URLSearchParams({ text, target_lang: targetLanguage });
+    const data = await request(this.fetchFn, "https://api-free.deepl.com/v2/translate", { method: "POST", headers: { authorization: `DeepL-Auth-Key ${key}`, "content-type": "application/x-www-form-urlencoded" }, body: params }, this.vendor) as { translations?: { text?: unknown }[] };
+    const translation = data.translations?.[0]?.text;
+    if (typeof translation !== "string") throw new VendorError("deepl response has no translation");
+    return translation;
   }
 }
 
-// Cost report. Each real dispatch records one entry. Dry runs record
-// nothing. The report answers "what did this pack spend".
-
-export interface CostEntry {
-  kind: string;
-  adapter: string;
-  units: number;
-  at: string;
-}
-
-export interface CostReport {
-  entries: CostEntry[];
-  dispatches: number;
-  units: number;
-}
-
-const costEntries: CostEntry[] = [];
-
-export function recordCost(entry: {
-  kind: string;
-  adapter: string;
-  units: number;
-}): void {
-  costEntries.push({ ...entry, at: new Date().toISOString() });
-}
-
-export function getCostReport(): CostReport {
-  const entries = costEntries.map((entry) => ({ ...entry }));
-  return {
-    entries,
-    dispatches: entries.filter((entry) => entry.kind === "dispatch").length,
-    units: entries.reduce((sum, entry) => sum + entry.units, 0),
-  };
-}
-
-export function resetCosts(): void {
-  costEntries.length = 0;
-}
-
-// Dispatch entry. Runs guards, then routes, then records cost.
-// Dry run walks the same path but calls no adapter and records no cost.
-
-export interface DispatchOptions {
-  adapter?: RouterAdapter;
-  guards?: Guards;
-  logger?: Logger;
-  dryRun?: boolean;
-}
-
-export interface DispatchResult {
-  dryRun: boolean;
-  adapter: string;
-  chars: number;
-  receipt?: DispatchReceipt;
-}
-
-export function createDryRunResult(text: string, adapterName: string): DispatchResult {
-  return { dryRun: true, adapter: adapterName, chars: text.length };
-}
-
-export async function dispatchText(
-  text: string,
-  options: DispatchOptions = {},
-): Promise<DispatchResult> {
-  const adapter = options.adapter ?? new LocalRouterAdapter();
-  options.guards?.checkDispatch(text);
-  if (options.dryRun === true) {
-    options.logger?.info(`dry run: would dispatch ${text.length} chars`);
-    return createDryRunResult(text, adapter.name);
+export class OpenAIAdapter implements VendorAdapter {
+  readonly vendor = "openai" as const;
+  private readonly fetchFn: typeof fetch;
+  constructor(options: FetchOptions = {}) { this.fetchFn = options.fetchFn ?? fetch; }
+  async translate(text: string, targetLanguage: string): Promise<string> {
+    const key = requireKey("OPENAI_API_KEY");
+    const data = await request(this.fetchFn, "https://api.openai.com/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "system", content: `Translate the user's text into ${targetLanguage}. Return only the translation.` }, { role: "user", content: text }], temperature: 0 }) }, this.vendor) as { choices?: { message?: { content?: unknown } }[] };
+    const translation = data.choices?.[0]?.message?.content;
+    if (typeof translation !== "string") throw new VendorError("openai response has no translation");
+    return translation;
   }
-  const receipt = await adapter.dispatch(text);
-  options.guards?.recordDispatch();
-  recordCost({ kind: "dispatch", adapter: adapter.name, units: text.length });
-  options.logger?.info(`dispatched ${text.length} chars via ${adapter.name}`);
-  return { dryRun: false, adapter: adapter.name, chars: text.length, receipt };
 }
 
-// Summarize. Pure text stats. The sample capability every face exposes.
-
-export interface TopWord {
-  word: string;
-  count: number;
-}
-
-export interface TextSummary {
-  chars: number;
-  words: number;
-  lines: number;
-  topWords: TopWord[];
-}
-
-export interface SummarizeOptions {
-  topN?: number;
-}
-
-export function summarizeText(
-  text: string,
-  options: SummarizeOptions = {},
-): TextSummary {
-  const topN = options.topN ?? 5;
-  const tokens = text.split(/\s+/).filter((token) => token.length > 0);
-  const counts = new Map<string, number>();
-  for (const token of tokens) {
-    const word = token.toLowerCase().replace(/[^a-z0-9]+/g, "");
-    if (word.length === 0) continue;
-    counts.set(word, (counts.get(word) ?? 0) + 1);
+export class WorkersAIAdapter implements VendorAdapter {
+  readonly vendor = "workers-ai" as const;
+  private readonly fetchFn: typeof fetch;
+  constructor(options: FetchOptions = {}) { this.fetchFn = options.fetchFn ?? fetch; }
+  async translate(text: string, targetLanguage: string): Promise<string> {
+    const key = requireKey("CLOUDFLARE_API_TOKEN");
+    const account = requireKey("CLOUDFLARE_ACCOUNT_ID");
+    const data = await request(this.fetchFn, `https://api.cloudflare.com/client/v4/accounts/${account}/ai/run/@cf/meta/m2m100-1.2b`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ text, target_lang: targetLanguage }) }, this.vendor) as { result?: { translated_text?: unknown } };
+    const translation = data.result?.translated_text;
+    if (typeof translation !== "string") throw new VendorError("workers-ai response has no translation");
+    return translation;
   }
-  const topWords = [...counts.entries()]
-    .map(([word, count]) => ({ word, count }))
-    .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word))
-    .slice(0, Math.max(0, topN));
-  return {
-    chars: text.length,
-    words: tokens.length,
-    lines: text.length === 0 ? 0 : text.split("\n").length,
-    topWords,
-  };
+}
+
+export function createVendorAdapter(vendor: Vendor, options: FetchOptions = {}): VendorAdapter {
+  if (vendor === "deepl") return new DeepLAdapter(options);
+  if (vendor === "openai") return new OpenAIAdapter(options);
+  return new WorkersAIAdapter(options);
+}
+
+export async function translate(request: TranslateRequest, adapter?: VendorAdapter): Promise<TranslationResult> {
+  if (!request.text) throw new Error("text must not be empty");
+  if (!request.targetLanguage) throw new Error("targetLanguage must not be empty");
+  const vendor = request.vendor ?? "deepl";
+  if (request.dryRun !== false) return { dryRun: true, vendor, text: request.text, targetLanguage: request.targetLanguage };
+  const liveAdapter = adapter ?? createVendorAdapter(vendor);
+  const translation = await liveAdapter.translate(request.text, request.targetLanguage);
+  return { dryRun: false, vendor, text: request.text, targetLanguage: request.targetLanguage, translation, id: randomUUID() };
 }
